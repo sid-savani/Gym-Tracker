@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSyncExternalStore, useCallback } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import {
@@ -17,6 +17,7 @@ export interface RestTimerState {
   remainingWhenPaused: number | null; // Seconds remaining when paused
   exerciseName: string | null;
   workoutId: string | null;
+  remainingSeconds: number;
 }
 
 export interface UseRestTimerReturn {
@@ -37,8 +38,8 @@ export interface UseRestTimerReturn {
   dismissCompleted: () => void;
 }
 
-// Module-level state for global persistence across component mounts/screens
-let globalTimerState: RestTimerState = {
+// Module-level single store
+let globalState: RestTimerState = {
   status: 'idle',
   totalDurationSeconds: DEFAULT_REST_SECONDS,
   startedAt: null,
@@ -46,12 +47,107 @@ let globalTimerState: RestTimerState = {
   remainingWhenPaused: null,
   exerciseName: null,
   workoutId: null,
+  remainingSeconds: 0,
 };
 
+let moduleTicker: ReturnType<typeof setInterval> | null = null;
 const listeners = new Set<() => void>();
 
 function notifyListeners() {
+  // Create new object reference for immutability
+  globalState = { ...globalState };
   listeners.forEach((listener) => listener());
+}
+
+function calculateCurrentRemaining(state: RestTimerState): number {
+  if (state.status === 'idle' || state.status === 'completed') return 0;
+  if (state.status === 'paused') {
+    return Math.max(0, state.remainingWhenPaused ?? 0);
+  }
+  if (state.status === 'running' && state.endAt) {
+    const remainingMs = state.endAt - Date.now();
+    return Math.max(0, Math.ceil(remainingMs / 1000));
+  }
+  return 0;
+}
+
+function stopTicker() {
+  if (moduleTicker) {
+    clearInterval(moduleTicker);
+    moduleTicker = null;
+  }
+}
+
+function triggerCompletion() {
+  stopTicker();
+  globalState = {
+    ...globalState,
+    status: 'completed',
+    remainingWhenPaused: null,
+    remainingSeconds: 0,
+  };
+  cancelRestNotification().catch(() => {});
+  notifyListeners();
+
+  try {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  } catch {
+    // Haptics fallback
+  }
+}
+
+function startTicker() {
+  stopTicker();
+
+  moduleTicker = setInterval(() => {
+    if (globalState.status !== 'running' || !globalState.endAt) {
+      stopTicker();
+      return;
+    }
+
+    const remaining = calculateCurrentRemaining(globalState);
+    if (remaining <= 0) {
+      triggerCompletion();
+    } else {
+      globalState = {
+        ...globalState,
+        remainingSeconds: remaining,
+      };
+      notifyListeners();
+    }
+  }, 500);
+}
+
+// Module-level AppState listener for background -> foreground transitions
+AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+  if (nextAppState === 'active') {
+    if (globalState.status === 'running' && globalState.endAt) {
+      const now = Date.now();
+      if (now >= globalState.endAt) {
+        triggerCompletion();
+      } else {
+        const remaining = Math.max(0, Math.ceil((globalState.endAt - now) / 1000));
+        globalState = {
+          ...globalState,
+          remainingSeconds: remaining,
+        };
+        startTicker();
+        notifyListeners();
+      }
+    }
+  }
+});
+
+// Store subscription
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function getSnapshot(): RestTimerState {
+  return globalState;
 }
 
 export function formatRestTime(seconds: number): string {
@@ -63,115 +159,8 @@ export function formatRestTime(seconds: number): string {
 }
 
 export function useRestTimer(): UseRestTimerReturn {
-  const [, setTick] = useState(0);
-  const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-  // Subscribe to module-level timer state updates
-  useEffect(() => {
-    const handleUpdate = () => {
-      setTick((t) => t + 1);
-    };
-    listeners.add(handleUpdate);
-    return () => {
-      listeners.delete(handleUpdate);
-    };
-  }, []);
-
-  // Compute remaining seconds from timestamps
-  const calculateRemaining = useCallback((): number => {
-    if (globalTimerState.status === 'idle') return 0;
-    if (globalTimerState.status === 'completed') return 0;
-    if (globalTimerState.status === 'paused') {
-      return globalTimerState.remainingWhenPaused ?? 0;
-    }
-    if (globalTimerState.status === 'running' && globalTimerState.endAt) {
-      const remainingMs = globalTimerState.endAt - Date.now();
-      return Math.max(0, Math.ceil(remainingMs / 1000));
-    }
-    return 0;
-  }, []);
-
-  const [remainingSeconds, setRemainingSeconds] = useState<number>(calculateRemaining);
-
-  // Trigger completion feedback
-  const handleRestComplete = useCallback(() => {
-    globalTimerState = {
-      ...globalTimerState,
-      status: 'completed',
-      remainingWhenPaused: null,
-    };
-    setRemainingSeconds(0);
-    cancelRestNotification().catch(() => {});
-    notifyListeners();
-
-    try {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    } catch {
-      // Haptics fallback
-    }
-  }, []);
-
-  // Sync remaining time with timestamps and manage ticker
-  useEffect(() => {
-    if (globalTimerState.status !== 'running' || !globalTimerState.endAt) {
-      if (tickerRef.current) {
-        clearInterval(tickerRef.current);
-        tickerRef.current = null;
-      }
-      setRemainingSeconds(calculateRemaining());
-      return;
-    }
-
-    const updateTimer = () => {
-      if (globalTimerState.status !== 'running' || !globalTimerState.endAt) return;
-
-      const remaining = calculateRemaining();
-      setRemainingSeconds(remaining);
-
-      if (remaining <= 0) {
-        if (tickerRef.current) {
-          clearInterval(tickerRef.current);
-          tickerRef.current = null;
-        }
-        handleRestComplete();
-      }
-    };
-
-    updateTimer();
-    tickerRef.current = setInterval(updateTimer, 500);
-
-    return () => {
-      if (tickerRef.current) {
-        clearInterval(tickerRef.current);
-        tickerRef.current = null;
-      }
-    };
-  }, [calculateRemaining, handleRestComplete]);
-
-  // Handle app background -> foreground transition
-  useEffect(() => {
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      if (nextAppState === 'active') {
-        if (globalTimerState.status === 'running' && globalTimerState.endAt) {
-          const now = Date.now();
-          if (now >= globalTimerState.endAt) {
-            handleRestComplete();
-          } else {
-            const remaining = Math.max(0, Math.ceil((globalTimerState.endAt - now) / 1000));
-            setRemainingSeconds(remaining);
-            notifyListeners();
-          }
-        }
-      }
-    };
-
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-    return () => {
-      subscription.remove();
-    };
-  }, [handleRestComplete]);
-
-  // Timer Actions
   const startRest = useCallback(
     (
       durationSeconds: number = DEFAULT_REST_SECONDS,
@@ -182,7 +171,7 @@ export function useRestTimer(): UseRestTimerReturn {
       const now = Date.now();
       const endAt = now + validDuration * 1000;
 
-      globalTimerState = {
+      globalState = {
         status: 'running',
         totalDurationSeconds: validDuration,
         startedAt: now,
@@ -190,9 +179,10 @@ export function useRestTimer(): UseRestTimerReturn {
         remainingWhenPaused: null,
         exerciseName: exerciseName || null,
         workoutId: workoutId || null,
+        remainingSeconds: validDuration,
       };
 
-      setRemainingSeconds(validDuration);
+      startTicker();
       scheduleRestCompleteNotification(validDuration, workoutId, exerciseName).catch(() => {});
       notifyListeners();
     },
@@ -200,80 +190,86 @@ export function useRestTimer(): UseRestTimerReturn {
   );
 
   const pauseRest = useCallback(() => {
-    if (globalTimerState.status !== 'running' || !globalTimerState.endAt) return;
+    if (globalState.status !== 'running' || !globalState.endAt) return;
 
-    const remaining = Math.max(0, Math.ceil((globalTimerState.endAt - Date.now()) / 1000));
-    globalTimerState = {
-      ...globalTimerState,
+    const remaining = Math.max(1, Math.ceil((globalState.endAt - Date.now()) / 1000));
+    stopTicker();
+
+    globalState = {
+      ...globalState,
       status: 'paused',
       remainingWhenPaused: remaining,
+      remainingSeconds: remaining,
     };
 
-    setRemainingSeconds(remaining);
     cancelRestNotification().catch(() => {});
     notifyListeners();
   }, []);
 
   const resumeRest = useCallback(() => {
     if (
-      globalTimerState.status !== 'paused' ||
-      globalTimerState.remainingWhenPaused === null ||
-      globalTimerState.remainingWhenPaused <= 0
+      globalState.status !== 'paused' ||
+      globalState.remainingWhenPaused === null ||
+      globalState.remainingWhenPaused <= 0
     ) {
       return;
     }
 
-    const remaining = globalTimerState.remainingWhenPaused;
+    const remaining = globalState.remainingWhenPaused;
     const now = Date.now();
     const endAt = now + remaining * 1000;
 
-    globalTimerState = {
-      ...globalTimerState,
+    globalState = {
+      ...globalState,
       status: 'running',
       startedAt: now,
       endAt,
       remainingWhenPaused: null,
+      remainingSeconds: remaining,
     };
 
-    setRemainingSeconds(remaining);
+    startTicker();
     scheduleRestCompleteNotification(
       remaining,
-      globalTimerState.workoutId || undefined,
-      globalTimerState.exerciseName || undefined
+      globalState.workoutId || undefined,
+      globalState.exerciseName || undefined
     ).catch(() => {});
     notifyListeners();
   }, []);
 
   const addThirtySeconds = useCallback(() => {
-    if (globalTimerState.status === 'running' && globalTimerState.endAt) {
-      const newEndAt = globalTimerState.endAt + REST_INCREMENT_SECONDS * 1000;
-      const newTotal = globalTimerState.totalDurationSeconds + REST_INCREMENT_SECONDS;
-      const newRemaining = Math.max(0, Math.ceil((newEndAt - Date.now()) / 1000));
+    if (globalState.status === 'running' && globalState.endAt) {
+      const newEndAt = globalState.endAt + REST_INCREMENT_SECONDS * 1000;
+      const newTotal = globalState.totalDurationSeconds + REST_INCREMENT_SECONDS;
+      const newRemaining = Math.max(1, Math.ceil((newEndAt - Date.now()) / 1000));
 
-      globalTimerState = {
-        ...globalTimerState,
+      globalState = {
+        ...globalState,
         endAt: newEndAt,
         totalDurationSeconds: newTotal,
+        remainingSeconds: newRemaining,
       };
 
-      setRemainingSeconds(newRemaining);
       scheduleRestCompleteNotification(
         newRemaining,
-        globalTimerState.workoutId || undefined,
-        globalTimerState.exerciseName || undefined
+        globalState.workoutId || undefined,
+        globalState.exerciseName || undefined
       ).catch(() => {});
       notifyListeners();
-    } else if (globalTimerState.status === 'paused' && globalTimerState.remainingWhenPaused !== null) {
-      const newRemaining = globalTimerState.remainingWhenPaused + REST_INCREMENT_SECONDS;
-      const newTotal = globalTimerState.totalDurationSeconds + REST_INCREMENT_SECONDS;
+    } else if (
+      globalState.status === 'paused' &&
+      globalState.remainingWhenPaused !== null
+    ) {
+      const newRemaining = globalState.remainingWhenPaused + REST_INCREMENT_SECONDS;
+      const newTotal = globalState.totalDurationSeconds + REST_INCREMENT_SECONDS;
 
-      globalTimerState = {
-        ...globalTimerState,
+      globalState = {
+        ...globalState,
         remainingWhenPaused: newRemaining,
         totalDurationSeconds: newTotal,
+        remainingSeconds: newRemaining,
       };
 
-      setRemainingSeconds(newRemaining);
       notifyListeners();
     } else {
       // If idle or completed, start a 30s rest timer
@@ -282,7 +278,8 @@ export function useRestTimer(): UseRestTimerReturn {
   }, [startRest]);
 
   const skipRest = useCallback(() => {
-    globalTimerState = {
+    stopTicker();
+    globalState = {
       status: 'idle',
       totalDurationSeconds: DEFAULT_REST_SECONDS,
       startedAt: null,
@@ -290,16 +287,17 @@ export function useRestTimer(): UseRestTimerReturn {
       remainingWhenPaused: null,
       exerciseName: null,
       workoutId: null,
+      remainingSeconds: 0,
     };
 
-    setRemainingSeconds(0);
     cancelRestNotification().catch(() => {});
     notifyListeners();
   }, []);
 
   const dismissCompleted = useCallback(() => {
-    if (globalTimerState.status === 'completed') {
-      globalTimerState = {
+    if (globalState.status === 'completed') {
+      stopTicker();
+      globalState = {
         status: 'idle',
         totalDurationSeconds: DEFAULT_REST_SECONDS,
         startedAt: null,
@@ -307,22 +305,22 @@ export function useRestTimer(): UseRestTimerReturn {
         remainingWhenPaused: null,
         exerciseName: null,
         workoutId: null,
+        remainingSeconds: 0,
       };
-      setRemainingSeconds(0);
       notifyListeners();
     }
   }, []);
 
   return {
-    status: globalTimerState.status,
-    remainingSeconds,
-    remainingDisplay: formatRestTime(remainingSeconds),
-    totalDurationSeconds: globalTimerState.totalDurationSeconds,
-    exerciseName: globalTimerState.exerciseName,
-    isRunning: globalTimerState.status === 'running',
-    isPaused: globalTimerState.status === 'paused',
-    isCompleted: globalTimerState.status === 'completed',
-    isIdle: globalTimerState.status === 'idle',
+    status: state.status,
+    remainingSeconds: state.remainingSeconds,
+    remainingDisplay: formatRestTime(state.remainingSeconds),
+    totalDurationSeconds: state.totalDurationSeconds,
+    exerciseName: state.exerciseName,
+    isRunning: state.status === 'running',
+    isPaused: state.status === 'paused',
+    isCompleted: state.status === 'completed',
+    isIdle: state.status === 'idle',
     startRest,
     pauseRest,
     resumeRest,

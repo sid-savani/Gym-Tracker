@@ -4,3 +4,5 @@ export * from './ExercisePickerModal';
 export * from './SetRow';
 export * from './WorkoutExerciseCard';
 export * from './RestTimer';
+export * from './WorkoutSummaryStats';
+export * from './WorkoutSummaryExerciseCard';

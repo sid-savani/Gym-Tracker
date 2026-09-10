@@ -106,9 +106,9 @@ export default function ActiveWorkoutScreen() {
   const handleConfirmFinishWorkout = async () => {
     try {
       setIsFinishing(true);
-      await finishWorkout();
+      const completed = await finishWorkout();
       setIsFinishSheetVisible(false);
-      router.replace('/(tabs)');
+      router.replace(`/workout/summary/${completed.id}`);
     } catch (err: any) {
       alert(err?.message || 'Failed to finish workout.');
     } finally {

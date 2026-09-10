@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -18,6 +18,10 @@ import {
 } from '@/design-system';
 import { useStartWorkout } from '@/hooks/useStartWorkout';
 import { Routine } from '@/data';
+import {
+  getInitialNotificationWorkoutId,
+  addNotificationResponseListener,
+} from '@/services/notifications';
 
 export default function StartWorkoutScreen() {
   const router = useRouter();
@@ -36,6 +40,33 @@ export default function StartWorkoutScreen() {
     startEmptyWorkout,
     formatElapsedTime,
   } = useStartWorkout();
+
+  // Route to active workout if launched by tapping a rest complete notification
+  useEffect(() => {
+    let isMounted = true;
+    getInitialNotificationWorkoutId().then((targetWorkoutId) => {
+      if (isMounted && targetWorkoutId) {
+        router.push({
+          pathname: '/workout/[id]',
+          params: { id: targetWorkoutId },
+        });
+      }
+    });
+
+    const unsubscribe = addNotificationResponseListener((targetWorkoutId) => {
+      if (targetWorkoutId) {
+        router.push({
+          pathname: '/workout/[id]',
+          params: { id: targetWorkoutId },
+        });
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [router]);
 
   // Create routine sheet state
   const [isCreateSheetOpen, setIsCreateSheetOpen] = useState(false);

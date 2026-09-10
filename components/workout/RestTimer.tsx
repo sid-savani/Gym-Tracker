@@ -9,12 +9,11 @@ export interface RestTimerProps {
 }
 
 export const RestTimer: React.FC<RestTimerProps> = ({ style }) => {
-  const { colors, spacing, radii, layout } = useTheme();
+  const { colors, spacing, radii, layout, shadows } = useTheme();
   const {
     status,
     remainingDisplay,
     isIdle,
-    isRunning,
     isPaused,
     isCompleted,
     pauseRest,
@@ -41,11 +40,7 @@ export const RestTimer: React.FC<RestTimerProps> = ({ style }) => {
           borderRadius: radii.medium,
           paddingHorizontal: spacing.md,
           paddingVertical: spacing.sm,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.15,
-          shadowRadius: 8,
-          elevation: 6,
+          ...shadows.subtle,
         },
         style,
       ]}
@@ -149,9 +144,9 @@ export const RestTimer: React.FC<RestTimerProps> = ({ style }) => {
           <>
             {/* Pause / Resume Button */}
             <Pressable
-              onPress={isRunning ? pauseRest : resumeRest}
+              onPress={isPaused ? resumeRest : pauseRest}
               accessibilityRole="button"
-              accessibilityLabel={isRunning ? 'Pause rest timer' : 'Resume rest timer'}
+              accessibilityLabel={isPaused ? 'Resume rest timer' : 'Pause rest timer'}
               hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
               style={({ pressed }) => [
                 styles.actionButton,
@@ -166,13 +161,13 @@ export const RestTimer: React.FC<RestTimerProps> = ({ style }) => {
               ]}
             >
               <AppIcon
-                name={isRunning ? 'pause' : 'play'}
+                name={isPaused ? 'play' : 'pause'}
                 size="xs"
                 color="primary"
                 style={{ marginRight: 4 }}
               />
               <AppText variant="caption" weight="bold">
-                {isRunning ? 'Pause' : 'Resume'}
+                {isPaused ? 'Resume' : 'Pause'}
               </AppText>
             </Pressable>
 
